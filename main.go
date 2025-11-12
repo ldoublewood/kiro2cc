@@ -78,6 +78,15 @@ type HistoryAssistantMessage struct {
 	} `json:"assistantResponseMessage"`
 }
 
+// AnthropicErrorResponse 表示 Anthropic API 的错误响应结构
+type AnthropicErrorResponse struct {
+	Type  string `json:"type"`
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
 // AnthropicRequest 表示 Anthropic API 的请求结构
 type AnthropicRequest struct {
 	Model       string                    `json:"model"`
@@ -720,13 +729,24 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		fmt.Printf("CodeWhisperer 响应错误，状态码: %d, 响应: %s\n", resp.StatusCode, string(body))
-		sendErrorEvent(w, flusher, "error", fmt.Errorf("状态码: %d", resp.StatusCode))
 
-		if resp.StatusCode == 403 {
+		// 根据不同的状态码发送相应的错误事件
+		switch resp.StatusCode {
+		case 400:
+			sendErrorEvent(w, flusher, "请求参数错误", fmt.Errorf("Bad Request: %s", string(body)))
+		case 401:
+			sendErrorEvent(w, flusher, "认证失败", fmt.Errorf("Unauthorized: 请检查token"))
+		case 403:
 			refreshToken()
-			sendErrorEvent(w, flusher, "error", fmt.Errorf("CodeWhisperer Token 已刷新，请重试"))
-		} else {
-			sendErrorEvent(w, flusher, "error", fmt.Errorf("CodeWhisperer Error: %s ", string(body)))
+			sendErrorEvent(w, flusher, "权限不足", fmt.Errorf("Forbidden: Token已刷新，请重试"))
+		case 429:
+			sendErrorEvent(w, flusher, "请求频率过高", fmt.Errorf("Rate Limited: 请稍后重试"))
+		case 500:
+			sendErrorEvent(w, flusher, "服务器内部错误", fmt.Errorf("Internal Server Error: CodeWhisperer服务异常"))
+		case 502, 503, 504:
+			sendErrorEvent(w, flusher, "服务不可用", fmt.Errorf("Service Unavailable: CodeWhisperer服务暂时不可用"))
+		default:
+			sendErrorEvent(w, flusher, "未知错误", fmt.Errorf("状态码: %d, 响应: %s", resp.StatusCode, string(body)))
 		}
 		return
 	}
@@ -819,7 +839,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 	cwReqBody, err := jsonStr.Marshal(cwReq)
 	if err != nil {
 		fmt.Printf("错误: 序列化请求失败: %v\n", err)
-		http.Error(w, fmt.Sprintf("序列化请求失败: %v", err), http.StatusInternalServerError)
+		sendJSONError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("序列化请求失败: %v", err))
 		return
 	}
 
@@ -833,7 +853,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 	)
 	if err != nil {
 		fmt.Printf("错误: 创建代理请求失败: %v\n", err)
-		http.Error(w, fmt.Sprintf("创建代理请求失败: %v", err), http.StatusInternalServerError)
+		sendJSONError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("创建代理请求失败: %v", err))
 		return
 	}
 
@@ -847,22 +867,47 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		fmt.Printf("错误: 发送请求失败: %v\n", err)
-		http.Error(w, fmt.Sprintf("发送请求失败: %v", err), http.StatusInternalServerError)
+		sendJSONError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("发送请求失败: %v", err))
 		return
 	}
 	defer resp.Body.Close()
+
+	// 检查响应状态码
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("CodeWhisperer 响应错误，状态码: %d, 响应: %s\n", resp.StatusCode, string(body))
+
+		// 根据不同的状态码返回相应的错误
+		switch resp.StatusCode {
+		case 400:
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("请求参数错误: %s", string(body)))
+		case 401:
+			sendJSONError(w, http.StatusUnauthorized, "authentication_error", "认证失败，请检查token")
+		case 403:
+			// 尝试刷新token
+			refreshToken()
+			sendJSONError(w, http.StatusForbidden, "permission_error", "权限不足，Token已刷新，请重试")
+		case 429:
+			sendJSONError(w, http.StatusTooManyRequests, "rate_limit_error", "请求频率过高，请稍后重试")
+		case 500:
+			sendJSONError(w, http.StatusInternalServerError, "api_error", "CodeWhisperer服务器内部错误")
+		case 502, 503, 504:
+			sendJSONError(w, http.StatusServiceUnavailable, "overloaded_error", "CodeWhisperer服务暂时不可用，请稍后重试")
+		default:
+			sendJSONError(w, resp.StatusCode, "api_error", fmt.Sprintf("CodeWhisperer返回错误，状态码: %d, 响应: %s", resp.StatusCode, string(body)))
+		}
+		return
+	}
 
 	// 读取响应
 	cwRespBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Printf("错误: 读取响应失败: %v\n", err)
-		http.Error(w, fmt.Sprintf("读取响应失败: %v", err), http.StatusInternalServerError)
+		sendJSONError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("读取响应失败: %v", err))
 		return
 	}
 
 	fmt.Printf("CodeWhisperer 响应体:\n%s\n", string(cwRespBody))
-
-	respBodyStr := string(cwRespBody)
 
 	events := parser.ParseEvents(cwRespBody)
 
@@ -945,8 +990,8 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 
 	// 检查是否是错误响应
 	if strings.Contains(string(cwRespBody), "Improperly formed request.") {
-		fmt.Printf("错误: CodeWhisperer返回格式错误: %s\n", respBodyStr)
-		http.Error(w, fmt.Sprintf("请求格式错误: %s", respBodyStr), http.StatusBadRequest)
+		fmt.Printf("错误: CodeWhisperer返回格式错误: %s\n", string(cwRespBody))
+		sendJSONError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("请求格式错误: %s", string(cwRespBody)))
 		return
 	}
 
@@ -991,14 +1036,26 @@ func sendErrorEvent(w http.ResponseWriter, flusher http.Flusher, message string,
 	errorResp := map[string]any{
 		"type": "error",
 		"error": map[string]any{
-			"type":    "overloaded_error",
-			"message": message,
+			"type":    "api_error",
+			"message": fmt.Sprintf("%s: %v", message, err),
 		},
 	}
 
-	// data: {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
-
 	sendSSEEvent(w, flusher, "error", errorResp)
+}
+
+// sendJSONError 发送JSON格式的错误响应
+func sendJSONError(w http.ResponseWriter, statusCode int, errorType, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	errorResp := AnthropicErrorResponse{
+		Type: "error",
+	}
+	errorResp.Error.Type = errorType
+	errorResp.Error.Message = message
+
+	jsonStr.NewEncoder(w).Encode(errorResp)
 }
 
 func FileExists(path string) (bool, error) {

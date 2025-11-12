@@ -3,6 +3,7 @@ package parser
 import (
 	"encoding/json"
 	"log"
+	"regexp"
 	"strings"
 )
 
@@ -14,6 +15,12 @@ type assistantResponseEvent struct {
 	Stop      bool    `json:"stop"`
 }
 
+type usageEvent struct {
+	Unit       string  `json:"unit"`
+	UnitPlural string  `json:"unitPlural"`
+	Usage      float64 `json:"usage"`
+}
+
 type SSEEvent struct {
 	Event string      `json:"event"`
 	Data  interface{} `json:"data"`
@@ -21,6 +28,11 @@ type SSEEvent struct {
 
 func ParseEvents(resp []byte) []SSEEvent {
 	events := []SSEEvent{}
+	
+	// Check if this is CodeWhisperer binary format
+	if isCodeWhispererFormat(resp) {
+		return parseCodeWhispererEvents(resp)
+	}
 	
 	// Parse standard SSE text format
 	lines := strings.Split(string(resp), "\n")
@@ -60,6 +72,62 @@ func ParseEvents(resp []byte) []SSEEvent {
 			} else {
 				log.Println("json unmarshal error:", err, "data:", dataStr)
 			}
+		}
+	}
+	
+	return events
+}
+
+func isCodeWhispererFormat(resp []byte) bool {
+	// Check for CodeWhisperer specific markers
+	respStr := string(resp)
+	return strings.Contains(respStr, ":message-type") && 
+		   strings.Contains(respStr, ":event-type") &&
+		   strings.Contains(respStr, "assistantResponseEvent")
+}
+
+func parseCodeWhispererEvents(resp []byte) []SSEEvent {
+	events := []SSEEvent{}
+	respStr := string(resp)
+	
+	// Extract JSON objects from the binary stream
+	jsonRegex := regexp.MustCompile(`\{"[^}]*"\}`)
+	matches := jsonRegex.FindAllString(respStr, -1)
+	
+	for _, match := range matches {
+		// Try to parse as content event
+		var contentEvt assistantResponseEvent
+		if err := json.Unmarshal([]byte(match), &contentEvt); err == nil && contentEvt.Content != "" {
+			events = append(events, convertAssistantEventToSSE(contentEvt))
+			continue
+		}
+		
+		// Try to parse as usage event
+		var usageEvt usageEvent
+		if err := json.Unmarshal([]byte(match), &usageEvt); err == nil && usageEvt.Unit != "" {
+			// Convert usage event to message_delta with usage info
+			events = append(events, SSEEvent{
+				Event: "message_delta",
+				Data: map[string]interface{}{
+					"type": "message_delta",
+					"delta": map[string]interface{}{
+						"stop_reason":   "end_turn",
+						"stop_sequence": nil,
+					},
+					"usage": map[string]interface{}{
+						"input_tokens":  0,
+						"output_tokens": int(usageEvt.Usage * 1000), // Convert to approximate token count
+					},
+				},
+			})
+			continue
+		}
+		
+		// Try to parse as tool use event
+		var toolEvt assistantResponseEvent
+		if err := json.Unmarshal([]byte(match), &toolEvt); err == nil && (toolEvt.ToolUseId != "" || toolEvt.Name != "") {
+			events = append(events, convertAssistantEventToSSE(toolEvt))
+			continue
 		}
 	}
 	
