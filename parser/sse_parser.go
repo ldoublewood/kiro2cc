@@ -1,10 +1,7 @@
 package parser
 
 import (
-	"bytes"
-	"encoding/binary"
 	"encoding/json"
-	"io"
 	"log"
 	"strings"
 )
@@ -23,73 +20,49 @@ type SSEEvent struct {
 }
 
 func ParseEvents(resp []byte) []SSEEvent {
-
 	events := []SSEEvent{}
-
-	r := bytes.NewReader(resp)
-	for {
-		if r.Len() < 12 {
-			break
+	
+	// Parse standard SSE text format
+	lines := strings.Split(string(resp), "\n")
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
-
-		var totalLen, headerLen uint32
-		if err := binary.Read(r, binary.BigEndian, &totalLen); err != nil {
-			break
-		}
-		if err := binary.Read(r, binary.BigEndian, &headerLen); err != nil {
-			break
-		}
-
-		if int(totalLen) > r.Len()+8 {
-			log.Println("Frame length invalid")
-			break
-		}
-
-		// Skip header
-		header := make([]byte, headerLen)
-		if _, err := io.ReadFull(r, header); err != nil {
-			break
-		}
-
-		payloadLen := int(totalLen) - int(headerLen) - 12
-		payload := make([]byte, payloadLen)
-		if _, err := io.ReadFull(r, payload); err != nil {
-			break
-		}
-
-		// Skip CRC32
-		if _, err := r.Seek(4, io.SeekCurrent); err != nil {
-			break
-		}
-
-		payloadStr := strings.TrimPrefix(string(payload), "vent")
-
-		var evt assistantResponseEvent
-		if err := json.Unmarshal([]byte(payloadStr), &evt); err == nil {
-
-			events = append(events, convertAssistantEventToSSE(evt))
-
-			if evt.ToolUseId != "" && evt.Name != "" {
-				if evt.Stop {
-					events = append(events, SSEEvent{
-						Event: "message_delta",
-						Data: map[string]interface{}{
-							"type": "message_delta",
-							"delta": map[string]interface{}{
-								"stop_reason":   "tool_use",
-								"stop_sequence": nil,
-							},
-							"usage": map[string]interface{}{"output_tokens": 0},
-						},
-					})
-				}
-
+		
+		// Handle SSE data lines
+		if strings.HasPrefix(line, "data: ") {
+			dataStr := strings.TrimPrefix(line, "data: ")
+			if dataStr == "[DONE]" {
+				break
 			}
-		} else {
-			log.Println("json unmarshal error:", err)
+			
+			var evt assistantResponseEvent
+			if err := json.Unmarshal([]byte(dataStr), &evt); err == nil {
+				events = append(events, convertAssistantEventToSSE(evt))
+				
+				if evt.ToolUseId != "" && evt.Name != "" {
+					if evt.Stop {
+						events = append(events, SSEEvent{
+							Event: "message_delta",
+							Data: map[string]interface{}{
+								"type": "message_delta",
+								"delta": map[string]interface{}{
+									"stop_reason":   "tool_use",
+									"stop_sequence": nil,
+								},
+								"usage": map[string]interface{}{"output_tokens": 0},
+							},
+						})
+					}
+				}
+			} else {
+				log.Println("json unmarshal error:", err, "data:", dataStr)
+			}
 		}
 	}
-
+	
 	return events
 }
 

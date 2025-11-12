@@ -860,7 +860,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 		return
 	}
 
-	// fmt.Printf("CodeWhisperer 响应体:\n%s\n", string(cwRespBody))
+	fmt.Printf("CodeWhisperer 响应体:\n%s\n", string(cwRespBody))
 
 	respBodyStr := string(cwRespBody)
 
@@ -942,7 +942,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 			"text": context,
 		})
 	}
-	
+
 	// 检查是否是错误响应
 	if strings.Contains(string(cwRespBody), "Improperly formed request.") {
 		fmt.Printf("错误: CodeWhisperer返回格式错误: %s\n", respBodyStr)
