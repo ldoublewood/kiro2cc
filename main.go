@@ -145,48 +145,50 @@ type ContentBlock struct {
 func getMessageContent(content any) string {
 	switch v := content.(type) {
 	case string:
-		if len(v) == 0 {
-			return "answer for user qeustion"
+		if len(strings.TrimSpace(v)) == 0 {
+			return "Please provide a response."
 		}
 		return v
 	case []interface{}:
 		var texts []string
 		for _, block := range v {
-
 			if m, ok := block.(map[string]interface{}); ok {
 				var cb ContentBlock
 				if data, err := jsonStr.Marshal(m); err == nil {
 					if err := jsonStr.Unmarshal(data, &cb); err == nil {
 						switch cb.Type {
 						case "tool_result":
-							texts = append(texts, *cb.Content)
+							if cb.Content != nil {
+								texts = append(texts, *cb.Content)
+							}
 						case "text":
-							texts = append(texts, *cb.Text)
+							if cb.Text != nil {
+								texts = append(texts, *cb.Text)
+							}
+						case "tool_use":
+							// Skip tool_use blocks for content extraction
+							continue
 						}
 					}
-
 				}
 			}
-
 		}
 		if len(texts) == 0 {
 			s, err := jsonStr.Marshal(content)
 			if err != nil {
-				return "answer for user qeustion"
+				return "Please provide a response."
 			}
-
-			log.Printf("uncatch: %s", string(s))
-			return "answer for user qeustion"
+			log.Printf("Unhandled content format: %s", string(s))
+			return "Please provide a response."
 		}
 		return strings.Join(texts, "\n")
 	default:
 		s, err := jsonStr.Marshal(content)
 		if err != nil {
-			return "answer for user qeustion"
+			return "Please provide a response."
 		}
-
-		log.Printf("uncatch: %s", string(s))
-		return "answer for user qeustion"
+		log.Printf("Unhandled content type: %s", string(s))
+		return "Please provide a response."
 	}
 }
 
@@ -226,8 +228,13 @@ type CodeWhispererEvent struct {
 }
 
 var ModelMap = map[string]string{
-	"claude-sonnet-4-20250514":  "CLAUDE_SONNET_4_20250514_V1_0",
-	"claude-3-5-haiku-20241022": "CLAUDE_3_7_SONNET_20250219_V1_0",
+	"claude-3-5-sonnet-20241022": "CLAUDE_3_5_SONNET_20241022_V2_0",
+	"claude-3-5-sonnet-20240620": "CLAUDE_3_5_SONNET_20240620_V1_0",
+	"claude-3-5-haiku-20241022":  "CLAUDE_3_5_HAIKU_20241022_V1_0",
+	"claude-3-opus-20240229":     "CLAUDE_3_OPUS_20240229_V1_0",
+	"claude-3-sonnet-20240229":   "CLAUDE_3_SONNET_20240229_V1_0",
+	"claude-3-haiku-20240307":    "CLAUDE_3_HAIKU_20240307_V1_0",
+	"claude-sonnet-4-20250514":   "CLAUDE_SONNET_4_20250514_V1_0",
 }
 
 // generateUUID generates a simple UUID v4
@@ -236,17 +243,34 @@ func generateUUID() string {
 	rand.Read(b)
 	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // Variant bits
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", 
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
 // buildCodeWhispererRequest 构建 CodeWhisperer 请求
 func buildCodeWhispererRequest(anthropicReq AnthropicRequest) CodeWhispererRequest {
+	// 使用环境变量或默认ProfileArn
+	profileArn := os.Getenv("KIRO_PROFILE_ARN")
+	if profileArn == "" {
+		profileArn = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"
+	}
+	
 	cwReq := CodeWhispererRequest{
-		ProfileArn: "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK",
+		ProfileArn: profileArn,
 	}
 	cwReq.ConversationState.ChatTriggerType = "MANUAL"
 	cwReq.ConversationState.ConversationId = generateUUID()
-	cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = getMessageContent(anthropicReq.Messages[len(anthropicReq.Messages)-1].Content)
+	
+	// 确保获取最后一条用户消息
+	lastMessage := anthropicReq.Messages[len(anthropicReq.Messages)-1]
+	content := getMessageContent(lastMessage.Content)
+	
+	// 确保内容不为空
+	if strings.TrimSpace(content) == "" {
+		content = "Please provide a response."
+	}
+	
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = content
 	cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
 	cwReq.ConversationState.CurrentMessage.UserInputMessage.Origin = "AI_EDITOR"
 	// 处理 tools 信息
@@ -482,6 +506,68 @@ func refreshToken() {
 	fmt.Printf("新的Access Token: %s\n", newToken.AccessToken)
 }
 
+// refreshTokenSilently 静默刷新token，用于服务器内部调用
+func refreshTokenSilently() error {
+	tokenPath := getTokenFilePath()
+
+	// 读取当前token
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return fmt.Errorf("读取token文件失败: %v", err)
+	}
+
+	var currentToken TokenData
+	if err := jsonStr.Unmarshal(data, &currentToken); err != nil {
+		return fmt.Errorf("解析token文件失败: %v", err)
+	}
+
+	// 准备刷新请求
+	refreshReq := RefreshRequest{
+		RefreshToken: currentToken.RefreshToken,
+	}
+
+	reqBody, err := jsonStr.Marshal(refreshReq)
+	if err != nil {
+		return fmt.Errorf("序列化请求失败: %v", err)
+	}
+
+	// 发送刷新请求
+	resp, err := http.Post(
+		"https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return fmt.Errorf("刷新token请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("刷新token失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	// 解析响应
+	var refreshResp RefreshResponse
+	if err := jsonStr.NewDecoder(resp.Body).Decode(&refreshResp); err != nil {
+		return fmt.Errorf("解析刷新响应失败: %v", err)
+	}
+
+	// 更新token文件
+	newToken := TokenData(refreshResp)
+	newData, err := jsonStr.MarshalIndent(newToken, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化新token失败: %v", err)
+	}
+
+	if err := os.WriteFile(tokenPath, newData, 0600); err != nil {
+		return fmt.Errorf("写入token文件失败: %v", err)
+	}
+
+	fmt.Printf("Token已静默刷新\n")
+	return nil
+}
+
 // exportEnvVars 导出环境变量
 func exportEnvVars() {
 	tokenPath := getTokenFilePath()
@@ -624,20 +710,44 @@ func startServer(port string) {
 		token, err := getToken()
 		if err != nil {
 			fmt.Printf("错误: 获取token失败: %v\n", err)
-			http.Error(w, fmt.Sprintf("获取token失败: %v", err), http.StatusInternalServerError)
+			sendJSONError(w, http.StatusInternalServerError, "authentication_error", fmt.Sprintf("获取token失败: %v", err))
+			return
+		}
+		
+		// 验证token不为空
+		if strings.TrimSpace(token.AccessToken) == "" {
+			fmt.Printf("错误: AccessToken为空\n")
+			sendJSONError(w, http.StatusUnauthorized, "authentication_error", "AccessToken为空，请先登录或刷新token")
 			return
 		}
 
+		// 限制请求体大小 (10MB)
+		r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+		
 		// 读取请求体
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			fmt.Printf("错误: 读取请求体失败: %v\n", err)
-			http.Error(w, fmt.Sprintf("读取请求体失败: %v", err), http.StatusInternalServerError)
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("读取请求体失败: %v", err))
 			return
 		}
 		defer r.Body.Close()
+		
+		// 验证请求体不为空
+		if len(body) == 0 {
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", "请求体不能为空")
+			return
+		}
 
 		fmt.Printf("\n=========================Anthropic 请求体:\n%s\n=======================================\n", string(body))
+		
+		// 验证JSON格式
+		var testJson map[string]interface{}
+		if err := jsonStr.Unmarshal(body, &testJson); err != nil {
+			fmt.Printf("错误: 请求体不是有效的JSON: %v\n", err)
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("请求体不是有效的JSON: %v", err))
+			return
+		}
 
 		// 解析 Anthropic 请求
 		var anthropicReq AnthropicRequest
@@ -649,11 +759,15 @@ func startServer(port string) {
 
 		// 基础校验，给出明确的错误提示
 		if anthropicReq.Model == "" {
-			http.Error(w, `{"message":"Missing required field: model"}`, http.StatusBadRequest)
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", "Missing required field: model")
 			return
 		}
 		if len(anthropicReq.Messages) == 0 {
-			http.Error(w, `{"message":"Missing required field: messages"}`, http.StatusBadRequest)
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", "Missing required field: messages")
+			return
+		}
+		if anthropicReq.MaxTokens <= 0 {
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", "max_tokens must be a positive integer")
 			return
 		}
 		if _, ok := ModelMap[anthropicReq.Model]; !ok {
@@ -662,8 +776,20 @@ func startServer(port string) {
 			for k := range ModelMap {
 				available = append(available, k)
 			}
-			http.Error(w, fmt.Sprintf("{\"message\":\"Unknown or unsupported model: %s\",\"availableModels\":[%s]}", anthropicReq.Model, "\""+strings.Join(available, "\",\"")+"\""), http.StatusBadRequest)
+			sendJSONError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Unknown or unsupported model: %s. Available models: %s", anthropicReq.Model, strings.Join(available, ", ")))
 			return
+		}
+		
+		// 验证消息格式
+		for i, msg := range anthropicReq.Messages {
+			if msg.Role != "user" && msg.Role != "assistant" {
+				sendJSONError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Invalid role '%s' in message %d. Must be 'user' or 'assistant'", msg.Role, i))
+				return
+			}
+			if msg.Content == nil || (fmt.Sprintf("%v", msg.Content) == "" && fmt.Sprintf("%v", msg.Content) != "0") {
+				sendJSONError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("Message %d has empty content", i))
+				return
+			}
 		}
 
 		// 如果是流式请求
@@ -727,7 +853,7 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 		return
 	}
 
-	// fmt.Printf("CodeWhisperer 流式请求体:\n%s\n", string(cwReqBody))
+	fmt.Printf("\n=========================CodeWhisperer 流式请求体:\n%s\n=======================================\n", string(cwReqBody))
 
 	// 创建流式请求
 	proxyReq, err := http.NewRequest(
@@ -744,13 +870,17 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 	proxyReq.Header.Set("Authorization", "Bearer "+accessToken)
 	proxyReq.Header.Set("Content-Type", "application/json")
 	proxyReq.Header.Set("Accept", "text/event-stream")
+	proxyReq.Header.Set("User-Agent", "kiro2cc/1.0")
+	proxyReq.Header.Set("X-Amz-Target", "CodeWhispererStreaming_20220101.GenerateAssistantResponse")
 
 	// 发送请求
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 60 * time.Second, // 流式请求需要更长超时
+	}
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
-		sendErrorEvent(w, flusher, "CodeWhisperer reqeust error", fmt.Errorf("reqeust error: %s", err.Error()))
+		sendErrorEvent(w, flusher, "CodeWhisperer request error", fmt.Errorf("request error: %s", err.Error()))
 		return
 	}
 	defer resp.Body.Close()
@@ -872,7 +1002,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 		return
 	}
 
-	// fmt.Printf("CodeWhisperer 请求体:\n%s\n", string(cwReqBody))
+	fmt.Printf("\n=========================CodeWhisperer 请求体:\n%s\n=======================================\n", string(cwReqBody))
 
 	// 创建请求
 	proxyReq, err := http.NewRequest(
@@ -889,9 +1019,13 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 	// 设置请求头
 	proxyReq.Header.Set("Authorization", "Bearer "+accessToken)
 	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyReq.Header.Set("User-Agent", "kiro2cc/1.0")
+	proxyReq.Header.Set("X-Amz-Target", "CodeWhispererStreaming_20220101.GenerateAssistantResponse")
 
 	// 发送请求
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
@@ -914,8 +1048,12 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 			sendJSONError(w, http.StatusUnauthorized, "authentication_error", "认证失败，请检查token")
 		case 403:
 			// 尝试刷新token
-			refreshToken()
-			sendJSONError(w, http.StatusForbidden, "permission_error", "权限不足，Token已刷新，请重试")
+			fmt.Printf("Token可能已过期，尝试刷新...\n")
+			if refreshErr := refreshTokenSilently(); refreshErr == nil {
+				sendJSONError(w, http.StatusForbidden, "permission_error", "Token已刷新，请重试请求")
+			} else {
+				sendJSONError(w, http.StatusForbidden, "permission_error", "权限不足且Token刷新失败，请重新登录")
+			}
 		case 429:
 			sendJSONError(w, http.StatusTooManyRequests, "rate_limit_error", "请求频率过高，请稍后重试")
 		case 500:
