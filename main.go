@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	jsonStr "encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -311,19 +312,41 @@ func buildCodeWhispererRequest(anthropicReq AnthropicRequest) CodeWhispererReque
 	return cwReq
 }
 
+var tokenFilePath string
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("用法:")
-		fmt.Println("  kiro2cc read    - 读取并显示token")
-		fmt.Println("  kiro2cc refresh - 刷新token")
-		fmt.Println("  kiro2cc export  - 导出环境变量")
-		fmt.Println("  kiro2cc claude  - 跳过 claude 地区限制")
-		fmt.Println("  kiro2cc server [port] - 启动Anthropic API代理服务器")
-		fmt.Println("  author https://github.com/bestK/kiro2cc")
+	// 定义命令行参数
+	flag.StringVar(&tokenFilePath, "f", "", "指定token文件路径")
+	
+	// 自定义用法信息
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "用法: %s [选项] <命令> [参数]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "选项:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n命令:\n")
+		fmt.Fprintf(os.Stderr, "  read    - 读取并显示token\n")
+		fmt.Fprintf(os.Stderr, "  refresh - 刷新token\n")
+		fmt.Fprintf(os.Stderr, "  export  - 导出环境变量\n")
+		fmt.Fprintf(os.Stderr, "  claude  - 跳过 claude 地区限制\n")
+		fmt.Fprintf(os.Stderr, "  server [port] - 启动Anthropic API代理服务器 (默认端口: 8080)\n")
+		fmt.Fprintf(os.Stderr, "\n示例:\n")
+		fmt.Fprintf(os.Stderr, "  %s read\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -f /path/to/token.json refresh\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s server 9000\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nauthor: https://github.com/bestK/kiro2cc\n")
+	}
+
+	// 解析命令行参数
+	flag.Parse()
+
+	// 获取剩余的非flag参数
+	args := flag.Args()
+	if len(args) == 0 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	command := os.Args[1]
+	command := args[0]
 
 	switch command {
 	case "read":
@@ -332,23 +355,29 @@ func main() {
 		refreshToken()
 	case "export":
 		exportEnvVars()
-
 	case "claude":
 		setClaude()
 	case "server":
 		port := "8080" // 默认端口
-		if len(os.Args) > 2 {
-			port = os.Args[2]
+		if len(args) > 1 {
+			port = args[1]
 		}
 		startServer(port)
 	default:
-		fmt.Printf("未知命令: %s\n", command)
+		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", command)
+		flag.Usage()
 		os.Exit(1)
 	}
 }
 
 // getTokenFilePath 获取跨平台的token文件路径
 func getTokenFilePath() string {
+	// 如果通过 -f 参数指定了token文件路径，则使用指定的路径
+	if tokenFilePath != "" {
+		return tokenFilePath
+	}
+
+	// 否则使用默认路径
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("获取用户目录失败: %v\n", err)
