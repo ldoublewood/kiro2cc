@@ -1,3 +1,6 @@
 *.exe
 
 *response.raw
+.vscode
+.idea
+kiro2cc

@@ -6,12 +6,12 @@
 
 ### 1. 模型名称不正确
 确保使用支持的模型名称：
-- `claude-3-5-sonnet-20241022`
-- `claude-3-5-sonnet-20240620`
-- `claude-3-5-haiku-20241022`
-- `claude-3-opus-20240229`
-- `claude-3-sonnet-20240229`
-- `claude-3-haiku-20240307`
+`claude-3-5-sonnet-20241022`
+`claude-3-5-sonnet-20240620`
+`claude-3-5-haiku-20241022`
+`claude-3-opus-20240229`
+`claude-3-sonnet-20240229`
+`claude-3-haiku-20240307`
 
 ### 2. 请求格式问题
 确保请求包含必需字段：
